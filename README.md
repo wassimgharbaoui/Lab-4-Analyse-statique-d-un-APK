@@ -1,223 +1,263 @@
-# 🔐 Lab 4 : Static Analysis of an Android APK
+# Android APK Reverse Engineering — Lab Writeup
 
-## 🎯 Lab Overview
-The goal of this lab is to explore the internal architecture of an Android application (`.apk` file), dissect its key components, and identify potential security weaknesses — all without running the application on a device. This approach is known as **static analysis**.
-
-## 🛠️ Work Environment
-* **Operating System :** Windows 10/11
-* **Shell :** PowerShell (Administrator)
-* **Target Application :** `UnCrackable-Level1.apk` (OWASP MSTG challenge)
+**Course:** Mobile Application Security  
+**Target:** UnCrackable-Level1.apk  
+**Date:** March 4–6, 2026  
+**Author:** Gharb
 
 ---
 
-## 📝 Task 1 : Workspace Setup & APK Integrity Check
+## What This Lab Is About
 
-Before diving into analysis, a clean and isolated working environment was established, and the APK file was verified to ensure its integrity had not been compromised.
+Mobile applications ship as `.apk` bundles. Even without running them, you can learn a surprising amount just by picking apart the package. This writeup walks through the complete process I followed: from setting up a controlled environment, to decompiling Java bytecode, to documenting every security-relevant finding.
 
-### 1. Setting Up the Working Directory
-A dedicated folder `C:\APK-Analysis` was created and the `.apk` file was placed inside.
-
-![Workspace creation and initial file verification](images/1.png)
-
-### 2. Verifying the ZIP Magic Bytes
-Android APK files are ZIP archives under the hood. PowerShell was used to read the file's first bytes in hexadecimal, confirming the presence of the ZIP magic signature (`50 4B` → `PK`).
-
-### 3. Listing Internal APK Contents
-By leveraging .NET's compression libraries directly in PowerShell, the 20 first entries of the APK were listed without extracting anything. Key files observed: `AndroidManifest.xml`, `classes.dex`, layout resources.
-
-### 4. Computing the SHA-256 Hash
-A SHA-256 fingerprint was calculated to establish a baseline — ensuring the file remains untouched throughout the audit.
-
-![APK contents listing and SHA-256 hash computation](images/2.png)
-
-> **SHA-256 :** `1DA8BF57D266109F9A07C01BF7111A1975CE01F190B9D914BCD3AE3DBEF96F21`
+No emulator. No device. Pure static analysis.
 
 ---
 
-## 📦 Task 2 : APK Acquisition & Validation
+## Tools I Used
 
-**Summary :** This step focuses on confirming the APK's presence in the environment and documenting its origin before any analysis begins.
-
-**Validation Checklist :**
-* ✅ **File Present :** The APK is confirmed in `C:\APK-Analysis`.
-* ✅ **Origin :** OWASP MSTG UnCrackable Level 1 — a public security training application.
-* ✅ **File Size :** 66 KB (66,651 bytes).
-
-![APK visible in the working directory](images/3.png)
+| Tool | Purpose |
+|------|---------|
+| PowerShell | File inspection, hashing, ZIP parsing |
+| JADX GUI | APK decompilation and manifest analysis |
+| dex2jar | Dalvik bytecode → Java JAR conversion |
+| JD-GUI | Java source browsing from the converted JAR |
 
 ---
 
-## 🔍 Task 3 : Manifest Analysis with JADX GUI
+## Step 1 — Building the Lab Environment
 
-**Summary :** JADX GUI was used to decompile the APK and inspect its `AndroidManifest.xml`. This file acts as the application's declaration — it defines permissions, components, and security configurations.
+I started by creating a dedicated folder at `C:\APK-Analysis` and dropping the APK inside it. Working in an isolated directory keeps forensic artifacts separate from the rest of the system — a basic but important habit.
 
-### 1. Application Identity
-Extracted from the manifest:
-* **Package name :** `owasp.mstg.uncrackable1`
-* **versionName :** `1.0`
-* **minSdkVersion :** `19` (Android 4.4 KitKat)
-* **targetSdkVersion :** `28` (Android 9 Pie)
+**Confirming the file is what it claims to be**
 
-### 2. Permissions Analysis
-* **Finding :** Zero `<uses-permission>` tags found. The application requests no system-level permissions (no camera, no location, no contacts access).
+APKs are ZIP files with a different extension. The quickest way to verify this is to check the magic bytes at offset 0. A valid ZIP always starts with `50 4B` in hex, which maps to `PK` in ASCII — the signature left by Phil Katz when he designed the format.
 
-### 3. Declared Components
-* One activity declared : `sg.vantagepoint.uncrackable1.MainActivity`
-* ⚠️ **Security note :** This activity includes an `<intent-filter>` (`android.intent.action.MAIN`), which implicitly exports it, making it reachable by other apps or automation tools.
+I ran a hex dump via PowerShell and confirmed the header matched. Screenshot below:
 
-### 4. Security Configuration Flags
-* **CleartextTraffic / Debuggable :** Neither `android:usesCleartextTraffic="true"` nor `android:debuggable="true"` were found — good security hygiene.
-* 🚨 **Issue detected :** `android:allowBackup="true"` is present. This flag allows anyone with physical or ADB access to extract the app's private data using `adb backup`.
+![Hex dump confirming ZIP magic bytes PK at offset 0](images/1.png)
 
-![AndroidManifest.xml open in JADX GUI](images/4.png)
+**Peeking inside without extracting**
 
----
+Using `System.IO.Compression.ZipFile` directly in PowerShell, I listed the first 20 entries without touching the disk:
 
-## 🕵️ Task 4 : Sensitive String Search
+```
+AndroidManifest.xml
+META-INF/CERT.RSA
+META-INF/CERT.SF
+META-INF/MANIFEST.MF
+classes.dex
+res/layout/activity_main.xml
+res/menu/menu_main.xml
+res/mipmap-*/ic_launcher.png  (multiple densities)
+resources.arsc
+```
 
-**Summary :** JADX GUI's global text search was used to hunt for hardcoded sensitive data — such as API keys, passwords, or hidden URLs — that developers may have left in the source code.
+**Hashing the file**
 
-Per the lab's severity grid, here is the report for the observations made.
+Before touching anything else, I locked in a SHA-256 fingerprint. If anything changes during the lab, the hash will catch it.
 
-### Observation 1 : URL Pattern Search (`http`)
-* **Match found :** `http://schemas.android.com/apk/res/android`
-* **Location :** `AndroidManifest.xml`, `res/layout/activity_main.xml`, `res/menu/menu_main.xml`
-* **Risk Level :** Low 🟢
-* **Analysis :** These are standard Android namespace declarations required by the XML schema — not data leaks. No sensitive endpoints were discovered.
+```
+SHA-256: 1DA8BF57D266109F9A07C01BF7111A1975CE01F190B9D914BCD3AE3DBEF96F21
+```
 
-![Text search for "http" across the APK in JADX](images/5.png)
+![File listing and SHA-256 hash captured in PowerShell](images/2.png)
 
 ---
 
-## 🔄 Task 5 : DEX to JAR Conversion with dex2jar
+## Step 2 — Confirming APK Acquisition
 
-**Summary :** Android bytecode is stored in `.dex` (Dalvik Executable) format, which is not directly readable by standard Java tools. This task extracts the DEX file and converts it into a `.jar` archive for use with Java decompilers.
+Quick sanity check before moving forward. The file was sitting in `C:\APK-Analysis`, dated 3/4/2026, weighing in at 66 KB (66,651 bytes exactly).
 
-### 1. Creating the Extraction Folder
-A dedicated output folder `dex_out` was created inside the workspace.
+Source: OWASP Mobile Security Testing Guide — UnCrackable Level 1. It's a deliberately vulnerable app built for security training.
 
-![Creating the dex_out output directory](images/6.png)
+![File Explorer showing UnCrackable-Level1.apk in the working directory](images/3.png)
 
-### 2. Extracting the DEX File
-PowerShell was used to open the APK as a ZIP archive and extract only the `classes.dex` file into `dex_out`.
+---
 
-![Extracting classes.dex from the APK](images/7.png)
+## Step 3 — Tearing Apart the Manifest
 
-![Confirming classes.dex extraction from UnCrackable-Level1.apk](images/8.png)
+The `AndroidManifest.xml` is the first file I always read. It's the app's ID card — package name, SDK targets, declared components, permissions, and security flags. Everything the system needs to know before launching the app lives here.
 
-### 3. Converting DEX to JAR
-The `dex2jar` command-line tool was then used to translate the Dalvik bytecode into standard Java bytecode:
+I opened the APK in JADX GUI and navigated directly to the manifest.
+
+**Package identity**
+
+```xml
+package="owasp.mstg.uncrackable1"
+android:versionName="1.0"
+android:minSdkVersion="19"
+android:targetSdkVersion="28"
+```
+
+So this app supports anything from Android 4.4 KitKat onwards, targeting Android 9 Pie behavior.
+
+**Permissions**
+
+Zero. Not a single `<uses-permission>` tag anywhere. The app doesn't ask for camera, location, contacts, storage — nothing. That's unusual but not suspicious for a standalone challenge app.
+
+**Components and attack surface**
+
+Only one activity was declared:
+
+```
+sg.vantagepoint.uncrackable1.MainActivity
+```
+
+It has an `<intent-filter>` with `android.intent.action.MAIN` and `android.intent.category.LAUNCHER`. Because of that filter, Android treats this activity as implicitly exported — meaning other apps on the device can send intents to it directly.
+
+**Security flags worth noting**
+
+- `android:debuggable` — not set → ✅ good
+- `android:usesCleartextTraffic` — not set → ✅ good  
+- `android:allowBackup="true"` — **present** → ⚠️ risk
+
+The backup flag is the one finding here. With `allowBackup` enabled, anyone with ADB access can dump the app's private data directory without root:
+
+```bash
+adb backup -noapk owasp.mstg.uncrackable1
+```
+
+For a training app this is acceptable. In production it's a data leakage vector.
+
+![AndroidManifest.xml decompiled and displayed inside JADX GUI](images/4.png)
+
+---
+
+## Step 4 — Hunting for Hardcoded Secrets
+
+Developers sometimes leave sensitive strings baked into the binary — API keys, tokens, internal URLs, debug credentials. JADX's text search covers classes, methods, fields, code, resources, and comments all at once.
+
+**Search #1 — "http"**
+
+Three hits, all pointing to the same thing:
+
+```
+http://schemas.android.com/apk/res/android
+```
+
+This appears in `AndroidManifest.xml`, `activity_main.xml`, and `menu_main.xml`. It's the standard Android XML namespace URI — not a live endpoint, not a leak. Every Android project includes this string automatically.
+
+Risk rating: **none**.
+
+![JADX text search results for "http" showing 3 namespace-only matches](images/5.png)
+
+No sensitive URLs, credentials, or tokens were found in this APK.
+
+---
+
+## Step 5 — Extracting and Converting the DEX Bytecode
+
+Android compiles Java into Dalvik Executable (`.dex`) format rather than standard JVM bytecode. To use classic Java decompilers like JD-GUI, the DEX needs to be translated first.
+
+**Extracting classes.dex**
+
+I created an output directory and used PowerShell's ZIP API to pull only the DEX file out of the APK:
+
+```powershell
+mkdir dex_out
+$zip = [System.IO.Compression.ZipFile]::OpenRead("C:\APK-Analysis\UnCrackable-Level1.apk")
+$zip.Entries | Where-Object { $_.Name -like "classes*.dex" } | ForEach-Object {
+    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($_, "C:\APK-Analysis\dex_out\$($_.Name)", $true)
+}
+$zip.Dispose()
+```
+
+Result: `classes.dex` (5,528 bytes) landed in `dex_out`.
+
+![mkdir dex_out command creating the output folder](images/6.png)
+
+![PowerShell extracting classes.dex from the APK](images/7.png)
+
+![Confirming classes.dex extracted from UnCrackable-Level1.apk](images/8.png)
+
+**Running dex2jar**
 
 ```powershell
 cd C:\APK-Analysis\dex2jar
 .\d2j-dex2jar.bat "C:\APK-Analysis\dex_out\classes.dex" -o "C:\APK-Analysis\app.jar"
 ```
 
-The conversion completed successfully, producing `app.jar`.
+Output: `classes.dex -> C:\APK-Analysis\app.jar` — conversion successful.
 
-![dex2jar converting classes.dex into app.jar](images/9.png)
-
----
-
-## ⚖️ Task 6 : JADX GUI vs JD-GUI — Tool Comparison
-
-**Summary :** Two decompilation tools were compared side by side using the same target class: `sg.vantagepoint.uncrackable1.MainActivity`. JADX works directly on the APK, while JD-GUI reads the `.jar` file generated by dex2jar.
-
-### Comparison Table
-
-| Criteria | JADX GUI | JD-GUI |
-| :--- | :--- | :--- |
-| **Input Format** | Works natively on `.apk` files | Requires a `.jar` file (via dex2jar) |
-| **Resource Access** | Full access to XML resources, manifest, assets | No access to Android resources — Java only |
-| **Code Readability** | Better variable naming reconstruction | Tends to preserve obfuscated names (`a`, `b`, `c`) |
-| **Workflow** | All-in-one: decompile & browse in one step | Two-step: convert DEX → JAR, then open in JD-GUI |
-
-### Verdict
-
-* **JADX GUI** is the superior tool for Android static analysis. Its native understanding of the APK format, combined with access to resources and improved readability, makes it the go-to choice for most audits.
-* **JD-GUI + dex2jar** remains a valuable fallback. In cases where JADX fails to decompile heavily obfuscated or protected APKs, this pipeline can sometimes bypass those protections and yield partial source code.
+![dex2jar successfully converting classes.dex to app.jar](images/9.png)
 
 ---
 
-## 📋 Task 7 : Static Analysis Mini-Report
+## Step 6 — JADX vs JD-GUI: Which One Wins?
 
-# Static Analysis Report — UnCrackable Level 1
+Both tools reconstruct Java source from compiled bytecode. But they're not equals.
 
-## A) General Information
-- **Analysis Date :** March 4, 2026
-- **Analyst :** Gharb (username)
-- **APK Analyzed :** `UnCrackable-Level1.apk`
-- **Version :** `1.0` (targetSdk: 28, minSdk: 19)
-- **Source :** OWASP MSTG training application (publicly available)
-- **Tools Used :** PowerShell, JADX GUI, dex2jar, JD-GUI
+**Where JADX stands out**
 
----
+JADX ingests APKs natively. It decodes binary XML, reconstructs resource references, deobfuscates where it can, and presents everything — manifest, resources, and code — inside a single unified browser. For Android work, this is the gold standard.
 
-## B) Executive Summary
+**Where JD-GUI fits in**
 
-This static analysis uncovered **1 configuration-level vulnerability** and identified **built-in anti-tampering mechanisms** within the UnCrackable Level 1 application.
+JD-GUI is a general-purpose Java decompiler. It knows nothing about Android-specific formats. Feed it a JAR and it shows you classes — nothing more. Renamed variables stay renamed. Resource IDs stay as integers. You lose context.
 
-The primary concern is the enabled backup flag (`allowBackup`), which could lead to local data exposure. The application is otherwise well-configured — it requests no dangerous permissions and does not expose unencrypted network traffic.
+**When to reach for dex2jar + JD-GUI**
 
-**Overall Risk Level : Medium 🟡**
+Sometimes JADX chokes. Heavily protected APKs with custom class loaders, multi-dex setups with non-standard merging, or aggressive obfuscation can cause JADX to fail partially or entirely. In those situations, dex2jar often manages to convert the DEX regardless, and JD-GUI can at least get you partial source to work with.
 
-**Priority Actions :**
-1. Set `android:allowBackup="false"` in the manifest to prevent ADB-based data extraction.
-2. Validate any data processed by `MainActivity` against malformed or malicious Intent inputs.
+**Bottom line**
+
+Use JADX first, every time. Fall back to the dex2jar → JD-GUI pipeline when JADX hits a wall.
 
 ---
 
-## C) Detailed Findings
+## Step 7 — Security Assessment Summary
 
-### Finding #1 — Backup Data Extraction Allowed
-- **Severity :** Medium 🟡
-- **Description :** The `android:allowBackup="true"` flag is set in the application manifest, enabling anyone with ADB access to extract the app's private storage.
-- **Location :** `AndroidManifest.xml` → `<application>` tag
-- **Potential Impact :** An attacker with physical USB access to an unlocked device could run `adb backup -noapk owasp.mstg.uncrackable1` and retrieve sensitive local data.
-- **Recommended Fix :** Explicitly set `android:allowBackup="false"` for any production application that handles sensitive user data.
+### Application Profile
 
-### Finding #2 — Anti-Debug Protections Detected
-- **Severity :** Informational 🟢
-- **Description :** The application actively checks whether a debugger is attached at runtime using `android.os.Debug.isDebuggerConnected()`.
-- **Location :** Java source classes (identified via JADX)
-- **Potential Impact :** Not a vulnerability — this is a protection measure. It raises the bar for dynamic analysis and exploitation.
-- **Recommended Fix :** Good practice already in place. No action required.
+| Field | Value |
+|-------|-------|
+| Package | `owasp.mstg.uncrackable1` |
+| Version | 1.0 |
+| SDK Range | 19 – 28 |
+| Permissions | None |
+| Network Traffic | N/A (no network calls detected) |
+| Exported Components | MainActivity (implicit) |
 
-### Finding #3 — MainActivity Implicitly Exported
-- **Severity :** Low 🟢
-- **Description :** Because `MainActivity` defines an `<intent-filter>`, Android marks it as exported by default, meaning external applications can potentially invoke it.
-- **Location :** `AndroidManifest.xml` → `sg.vantagepoint.uncrackable1.MainActivity`
-- **Potential Impact :** As the main launcher entry point, this is expected behavior. However, any Intent data received should be strictly validated to prevent Intent injection.
-- **Recommended Fix :** Ensure all data arriving via the launch Intent is properly sanitized before processing.
+### Vulnerability Table
+
+| # | Finding | Severity | Location |
+|---|---------|----------|----------|
+| 1 | `android:allowBackup="true"` enables ADB data extraction | Medium | `AndroidManifest.xml` |
+| 2 | Anti-debug checks present (`isDebuggerConnected`) | Info | Java source (MainActivity) |
+| 3 | MainActivity implicitly exported via intent-filter | Low | `AndroidManifest.xml` |
+
+### Finding Details
+
+**[MEDIUM] Backup Enabled**  
+Any user with a USB cable and developer mode enabled can dump the app's `/data/data/` directory. For apps storing tokens, session data, or locally cached credentials, this is a real attack path. Fix: `android:allowBackup="false"`.
+
+**[INFO] Anti-Debug Logic**  
+The app detects debugger attachment at runtime. This is a protection, not a flaw. It signals the developer was aware of runtime analysis and took steps against it — which is exactly what you'd expect from a crackme challenge.
+
+**[LOW] Exported Entry Point**  
+`MainActivity` is reachable by external intents because it handles `MAIN/LAUNCHER`. Standard behavior for a launcher activity. No data processing from incoming intents was identified, so the practical risk here is minimal.
+
+### Recommendations
+
+1. Set `android:allowBackup="false"` before any production deployment
+2. Review any Intent extras parsed by `MainActivity` for injection risks
+3. Current configuration (no permissions, no cleartext traffic, no debug flag) is solid — keep it
 
 ---
 
-## D) Appendix
+## Step 8 — Cleanup
 
-### Permissions Declared
-- *None* — no `<uses-permission>` tags present in the manifest.
-
-### Exported Components
-| Component | Type | Export Reason |
-| :--- | :--- | :--- |
-| `sg.vantagepoint.uncrackable1.MainActivity` | Activity | Implicit — `intent-filter` present |
-
----
-
-## 🧹 Task 8 : Cleanup & Lab Wrap-Up
-
-**Summary :** The final step involved reviewing findings, organizing deliverables, and removing temporary analysis artifacts from the workspace.
-
-### 1. Review & Organization
-* **Data Sensitivity Check :** Since this is an OWASP training app, no real credentials, tokens, or production data were handled during the audit.
-* **Deliverables Archived :** The decompiled `app.jar` was stored in a `/results` subfolder for reference.
-
-### 2. Removing Temporary Artifacts
-To maintain a clean and secure environment, intermediate files were deleted after use:
+After wrapping up the analysis, intermediate files were cleared:
 
 ```powershell
 Remove-Item -Recurse -Force .\dex_out
 Remove-Item .\UnCrackable-Level1.apk
 ```
 
-> ✅ Workspace cleaned. Analysis complete.
+The converted `app.jar` was archived under `\results` for future reference. No sensitive data was handled during this lab — the target is a public training application.
+
+---
+
+*Lab completed. All findings documented. Environment cleaned.*
