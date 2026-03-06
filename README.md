@@ -36,7 +36,10 @@ APKs are ZIP files with a different extension. The quickest way to verify this i
 
 I ran a hex dump via PowerShell and confirmed the header matched. Screenshot below:
 
-![Hex dump confirming ZIP magic bytes PK at offset 0](images/1.png)
+
+<img width="1200" height="279" alt="Screenshot 2026-03-04 152123" src="https://github.com/user-attachments/assets/4c683637-3b42-46e0-986b-d54d6c1012e8" />
+
+
 
 **Peeking inside without extracting**
 
@@ -62,7 +65,9 @@ Before touching anything else, I locked in a SHA-256 fingerprint. If anything ch
 SHA-256: 1DA8BF57D266109F9A07C01BF7111A1975CE01F190B9D914BCD3AE3DBEF96F21
 ```
 
-![File listing and SHA-256 hash captured in PowerShell](images/2.png)
+
+<img width="1727" height="636" alt="Screenshot 2026-03-04 153134" src="https://github.com/user-attachments/assets/a7fa60b4-dcd5-4cd3-9c7c-a798815aebfa" />
+
 
 ---
 
@@ -72,7 +77,8 @@ Quick sanity check before moving forward. The file was sitting in `C:\APK-Analys
 
 Source: OWASP Mobile Security Testing Guide — UnCrackable Level 1. It's a deliberately vulnerable app built for security training.
 
-![File Explorer showing UnCrackable-Level1.apk in the working directory](images/3.png)
+
+<img width="1379" height="552" alt="Screenshot 2026-03-04 151740" src="https://github.com/user-attachments/assets/171a216a-ab28-47cb-a78a-9e0775c6e698" />
 
 ---
 
@@ -121,7 +127,8 @@ adb backup -noapk owasp.mstg.uncrackable1
 
 For a training app this is acceptable. In production it's a data leakage vector.
 
-![AndroidManifest.xml decompiled and displayed inside JADX GUI](images/4.png)
+<img width="1321" height="739" alt="Screenshot 2026-03-04 153629" src="https://github.com/user-attachments/assets/fad9229f-ed0a-495e-9c91-6ae231e8adb2" />
+
 
 ---
 
@@ -141,7 +148,8 @@ This appears in `AndroidManifest.xml`, `activity_main.xml`, and `menu_main.xml`.
 
 Risk rating: **none**.
 
-![JADX text search results for "http" showing 3 namespace-only matches](images/5.png)
+<img width="977" height="608" alt="Screenshot 2026-03-06 160317" src="https://github.com/user-attachments/assets/36c20060-dc56-4cc7-8614-68ff87c87525" />
+
 
 No sensitive URLs, credentials, or tokens were found in this APK.
 
@@ -166,11 +174,14 @@ $zip.Dispose()
 
 Result: `classes.dex` (5,528 bytes) landed in `dex_out`.
 
-![mkdir dex_out command creating the output folder](images/6.png)
+<img width="951" height="291" alt="Screenshot 2026-03-06 160552" src="https://github.com/user-attachments/assets/2392be05-c8fa-4edb-9ba3-9b700ecf5748" />
 
-![PowerShell extracting classes.dex from the APK](images/7.png)
 
-![Confirming classes.dex extracted from UnCrackable-Level1.apk](images/8.png)
+<img width="1053" height="349" alt="Screenshot 2026-03-06 160623" src="https://github.com/user-attachments/assets/ac649ecd-687a-41cb-bbde-3f307a92aaea" />
+
+
+<img width="1346" height="480" alt="Screenshot 2026-03-06 160922" src="https://github.com/user-attachments/assets/f1b9a852-7016-46dd-bdb9-8bb25ac60eb3" />
+
 
 **Running dex2jar**
 
@@ -181,7 +192,8 @@ cd C:\APK-Analysis\dex2jar
 
 Output: `classes.dex -> C:\APK-Analysis\app.jar` — conversion successful.
 
-![dex2jar successfully converting classes.dex to app.jar](images/9.png)
+<img width="1049" height="89" alt="Screenshot 2026-03-06 161358" src="https://github.com/user-attachments/assets/2f6445e8-2808-4cc0-80a4-bff7a28061fe" />
+
 
 ---
 
